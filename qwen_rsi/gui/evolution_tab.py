@@ -29,6 +29,7 @@ class EvolutionTab(QWidget):
         self.s = settings
         self.archive = archive
         self.worker: EvolutionWorker | None = None
+        self.other_busy = lambda: False   # set by the main window (RSI loop running?)
         self._dirty = True
 
         mono = QFontDatabase.systemFont(QFontDatabase.FixedFont)
@@ -116,6 +117,9 @@ class EvolutionTab(QWidget):
     # ------------------------------------------------------------------ loop
     def start(self) -> None:
         if self.worker is not None:
+            return
+        if self.other_busy():
+            QMessageBox.information(self, "Busy", "The RSI loop is running; it already includes agent evolution.")
             return
         self.worker = EvolutionWorker(self.s, self.archive, self.gens.value() or None)
         self.worker.event.connect(self.on_event)

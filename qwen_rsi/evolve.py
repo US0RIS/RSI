@@ -91,6 +91,11 @@ class Evolver:
         self.rng = rng or random.Random()
         self.stop = threading.Event()
         self._infra_error: str | None = None
+        self.model_override: str | None = None   # evaluate a genome under another model (self-training gate)
+
+    @property
+    def model(self) -> str:
+        return self.model_override or self.s.model
 
     # ------------------------------------------------------------------ util
     def emit(self, kind: str, msg: str) -> None:
@@ -111,7 +116,7 @@ class Evolver:
             think = None
         messages = [m for m in (req.get("messages") or []) if isinstance(m, dict)]
         try:
-            r = self.client.chat(self.s.model, messages, think=think, format=req.get("format"),
+            r = self.client.chat(self.model, messages, think=think, format=req.get("format"),
                                  options=opts, tools=req.get("tools") or None,
                                  keep_alive=self.s.keep_alive, stop=self.stop)
         except OllamaError as e:
@@ -142,7 +147,7 @@ class Evolver:
         return out
 
     # ------------------------------------------------------------ evaluation
-    def evaluate_tasks(self, vid: str, tasks: list[Task], stage: str) -> EvalSummary:
+    def evaluate_tasks(self, vid: str, tasks: list[Task], stage: str, record: bool = True) -> EvalSummary:
         genome = self.archive.read_files(vid)
         results: list[GradeResult] = []
         calls = toks = 0
@@ -159,9 +164,10 @@ class Evolver:
             calls += st.llm_calls
             toks += st.prompt_tokens + st.output_tokens
             secs += st.seconds
-            self.archive.record_eval(vid, t.id, t.split, stage, g.score, g.passed, g.total, g.failures, g.error,
-                                     st.seconds, st.llm_calls, st.prompt_tokens + st.output_tokens)
-            self.archive.add_usage(vid, st.llm_calls, st.prompt_tokens, st.output_tokens, st.seconds)
+            if record:
+                self.archive.record_eval(vid, t.id, t.split, stage, g.score, g.passed, g.total, g.failures,
+                                         g.error, st.seconds, st.llm_calls, st.prompt_tokens + st.output_tokens)
+                self.archive.add_usage(vid, st.llm_calls, st.prompt_tokens, st.output_tokens, st.seconds)
             self.emit("eval", f"{vid} {stage} {t.id}: {g.passed}/{g.total}" + (f" ({g.error[:120]})" if g.error else ""))
             results.append(g)
         score = sum(r.score for r in results) / len(tasks) if tasks else 0.0
@@ -222,7 +228,7 @@ class Evolver:
     def select_parent(self) -> str:
         """DGM parent selection: sigmoid-scaled score x novelty bonus, plus a
         bonus for variants whose children tend to improve (good improvers)."""
-        cands = self.archive.evaluated()
+        cands = self.archive.evaluated(self.s.model)
         if not cands:
             raise RuntimeError("archive has no evaluated variants")
         weights = []
@@ -296,11 +302,41 @@ class Evolver:
             return None, "agent.py is missing " + ", ".join(sorted(missing))
         return clean, ""
 
+    def evaluate_full(self, vid: str) -> tuple[float, float]:
+        """Dev + hold-out evaluation with no parent comparison (used for seeds and re-basing)."""
+        d = self.evaluate_tasks(vid, self.dev, "dev")
+        if self.stop.is_set():
+            return d.score, 0.0
+        h = self.evaluate_tasks(vid, self.holdout, "holdout")
+        smoke_ids = {t.id for t in self.smoke_tasks()}
+        smoke = [r.score for r in d.results if r.task_id in smoke_ids]
+        self.archive.update(vid, smoke=sum(smoke) / max(1, len(smoke)), dev=d.score, holdout=h.score,
+                            status="evaluated" if not self.stop.is_set() else "created")
+        return d.score, h.score
+
+    def rebase_champion(self, rationale: str) -> str | None:
+        """Copy the champion genome into a variant evaluated under the current model,
+        so scores measured with different weights are never compared."""
+        champ = self.archive.champion()
+        if champ is None:
+            return None
+        vid = self.archive.add(self.archive.read_files(champ.id), champ.id, rationale, model=self.s.model)
+        self.emit("rebase", f"{vid}: champion {champ.id} re-evaluated under {self.s.model}")
+        dev, hold = self.evaluate_full(vid)
+        if self.stop.is_set():
+            return None
+        self.archive.set_champion(vid)
+        self.emit("champion", f"{vid} is champion under {self.s.model} (dev={dev:.3f}, holdout={hold:.3f})")
+        return vid
+
     def ensure_seed(self) -> str:
         if not self.archive.all():
-            vid = self.archive.import_seed(SEED_DIR)
+            vid = self.archive.import_seed(SEED_DIR, model=self.s.model)
             self.emit("seed", f"imported seed genome as {vid}")
         champ = self.archive.champion()
+        if champ is not None and champ.model not in (None, self.s.model):
+            self.rebase_champion(f"re-evaluated under {self.s.model}")
+            champ = self.archive.champion()
         if champ is None:
             roots = [v for v in self.archive.all() if v.parent_id is None]
             if roots:
@@ -323,24 +359,26 @@ class Evolver:
         if self.stop.is_set():
             return None
         if not out.ok or not isinstance(out.result, dict):
-            child = self.archive.add(self.archive.read_files(parent_id), parent_id, "improve() failed")
+            child = self.archive.add(self.archive.read_files(parent_id), parent_id, "improve() failed",
+                                     model=self.s.model)
             self.archive.update(child, status="failed", error=(out.error or "no result")[-1500:])
             self.emit("fail", f"{parent_id}.improve() failed: {(out.error or '')[:200]}")
             return child
         files, problem = self.validate_files(out.result.get("files"))
         rationale = str(out.result.get("rationale", ""))
         if files is None:
-            child = self.archive.add(self.archive.read_files(parent_id), parent_id, rationale)
+            child = self.archive.add(self.archive.read_files(parent_id), parent_id, rationale, model=self.s.model)
             self.archive.update(child, status="failed", error=problem)
             self.emit("fail", f"child of {parent_id} invalid: {problem}")
             return child
-        child = self.archive.add(files, parent_id, rationale)
+        child = self.archive.add(files, parent_id, rationale, model=self.s.model)
         self.emit("child", f"{child} created from {parent_id} in {time.monotonic() - t0:.0f}s: {rationale[:200]}")
         self.evaluate(child, parent_id)
         return child
 
-    def run(self, generations: int | None = None) -> None:
-        self.stop.clear()
+    def run(self, generations: int | None = None, clear_stop: bool = True) -> None:
+        if clear_stop:
+            self.stop.clear()
         try:
             self.ensure_seed()
             n = 0

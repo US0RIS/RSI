@@ -58,6 +58,19 @@ class Settings:
     exec_timeout_s: float = 10.0
     sandbox_memory_mb: int = 1024
 
+    # --- Full RSI (self-training) ---------------------------------------------
+    base_model: str = DEFAULT_MODEL           # Ollama base the LoRA adapters are applied to
+    hf_base_model: str = "unsloth/Qwen3.8-27B-unsloth-bnb-4bit"   # same weights, for training
+    trainer_python: str = ""                  # python.exe of the training venv ("" = default location)
+    ollama_exe: str = "ollama"
+    rsi_scaffold_generations: int = 3         # code/prompt generations per round
+    rsi_auto_promote: bool = True             # the RSI button promotes without asking (gates still apply)
+    rsi_model_margin: float = 0.03            # new weights must beat current on hold-out by this much
+    rsi_dev_tolerance: float = 0.05           # ...and may not lose more than this on dev
+    rsi_min_examples: int = 40                # skip training when fewer verified examples exist
+    rsi_train_timeout_h: float = 48.0
+    rsi_keep_failed_models: bool = False      # `ollama rm` rejected adapters to save disk
+
     extra: dict = field(default_factory=dict)
 
     # ------------------------------------------------------------------------
@@ -79,6 +92,12 @@ class Settings:
 
     def save(self) -> None:
         self.path().write_text(json.dumps(asdict(self), indent=2), encoding="utf-8")
+
+    def trainer_python_path(self) -> str:
+        if self.trainer_python:
+            return self.trainer_python
+        venv = data_dir() / "trainer-venv"
+        return str(venv / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python"))
 
     def think_value(self, level: str | None = None):
         """Translate a UI think level into Ollama's ``think`` field."""

@@ -11,6 +11,7 @@ from ..archive import Archive
 from ..config import APP_NAME, Settings, data_dir
 from .chat_tab import ChatTab
 from .evolution_tab import EvolutionTab
+from .rsi_tab import RSITab
 from .settings_tab import SettingsTab
 from .workers import StatusPoller
 
@@ -45,12 +46,16 @@ class MainWindow(QMainWindow):
         self.resize(1280, 860)
 
         self.chat = ChatTab(settings, self.archive)
+        self.rsi = RSITab(settings, self.archive)
         self.evo = EvolutionTab(settings, self.archive)
+        self.rsi.other_busy = lambda: self.evo.worker is not None
+        self.evo.other_busy = lambda: self.rsi.worker is not None
         self.settings_tab = SettingsTab(settings)
         tabs = QTabWidget()
         tabs.setDocumentMode(True)
+        tabs.addTab(self.rsi, "RSI")
         tabs.addTab(self.chat, "Chat")
-        tabs.addTab(self.evo, "Self-improvement")
+        tabs.addTab(self.evo, "Agent evolution")
         tabs.addTab(self.settings_tab, "Settings")
         self.setCentralWidget(tabs)
 
@@ -62,12 +67,14 @@ class MainWindow(QMainWindow):
             self.tray.setToolTip(APP_NAME)
             self.tray.show()
         self.evo.notify.connect(self.toast)
+        self.rsi.notify.connect(self.toast)
 
         self.poller = StatusPoller(settings)
         self.poller.status.connect(self.on_status)
         self.poller.start()
 
     def on_status(self, ok: bool, text: str) -> None:
+        self.setWindowTitle(f"Qwen RSI · {self.s.model}")
         self.conn.setText(("● " if ok else "○ ") + text)
         self.conn.setStyleSheet("" if ok else "color: #c42b1c;")
 
@@ -79,6 +86,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, ev) -> None:
         self.poller.halt()
         self.chat.shutdown()
+        self.rsi.shutdown()
         self.evo.shutdown()
         self.poller.wait(2000)
         self.archive.close()

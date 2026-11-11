@@ -48,6 +48,22 @@ CREATE TABLE IF NOT EXISTS evals (
 CREATE TABLE IF NOT EXISTS events (
     ts REAL NOT NULL, kind TEXT NOT NULL, message TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS models (
+    tag TEXT PRIMARY KEY,               -- Ollama model name
+    parent_tag TEXT,
+    round INTEGER NOT NULL,
+    created_at REAL NOT NULL,
+    status TEXT NOT NULL,               -- base | training | rejected | promoted | failed
+    recipe TEXT DEFAULT '{}',
+    stats TEXT DEFAULT '{}',
+    dev REAL, holdout REAL, audit REAL,
+    is_current INTEGER DEFAULT 0,
+    error TEXT DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS model_scores (
+    model TEXT NOT NULL, genome_id TEXT NOT NULL, split TEXT NOT NULL, score REAL NOT NULL,
+    PRIMARY KEY (model, genome_id, split)
+);
 """
 
 
@@ -69,6 +85,23 @@ class Variant:
     output_tokens: int
     seconds: float
     error: str
+    model: str | None = None
+
+
+@dataclass
+class ModelRecord:
+    tag: str
+    parent_tag: str | None
+    round: int
+    created_at: float
+    status: str
+    recipe: dict
+    stats: dict
+    dev: float | None
+    holdout: float | None
+    audit: float | None
+    is_current: bool
+    error: str
 
 
 class Archive:
@@ -80,6 +113,9 @@ class Archive:
         self.db = sqlite3.connect(self.root / "archive.db", check_same_thread=False)
         self.db.row_factory = sqlite3.Row
         self.db.executescript(_SCHEMA)
+        cols = {r[1] for r in self.db.execute("PRAGMA table_info(variants)")}
+        if "model" not in cols:  # migrate archives created before self-training existed
+            self.db.execute("ALTER TABLE variants ADD COLUMN model TEXT")
         self.db.commit()
 
     # ------------------------------------------------------------------ files
@@ -97,7 +133,8 @@ class Archive:
             n += 1
         return f"g{n:04d}"
 
-    def add(self, files: dict[str, str], parent_id: str | None, rationale: str = "") -> str:
+    def add(self, files: dict[str, str], parent_id: str | None, rationale: str = "",
+            model: str | None = None) -> str:
         with self._lock:
             vid = self._next_id()
             d = self.genome_dir(vid)
@@ -107,14 +144,15 @@ class Archive:
                     (d / name).write_text(text, encoding="utf-8")
             gen = 0 if parent_id is None else (self.get(parent_id).generation + 1)
             self.db.execute(
-                "INSERT INTO variants (id, parent_id, generation, created_at, status, rationale) VALUES (?,?,?,?,?,?)",
-                (vid, parent_id, gen, time.time(), "created", rationale[:4000]))
+                "INSERT INTO variants (id, parent_id, generation, created_at, status, rationale, model) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (vid, parent_id, gen, time.time(), "created", rationale[:4000], model))
             self.db.commit()
             return vid
 
-    def import_seed(self, seed_dir: Path) -> str:
+    def import_seed(self, seed_dir: Path, model: str | None = None) -> str:
         files = {p.name: p.read_text(encoding="utf-8") for p in seed_dir.iterdir() if p.name in GENOME_FILES}
-        return self.add(files, None, "seed genome")
+        return self.add(files, None, "seed genome", model=model)
 
     # --------------------------------------------------------------- records
     def update(self, vid: str, **fields) -> None:
@@ -184,8 +222,9 @@ class Archive:
             rows = self.db.execute("SELECT * FROM variants ORDER BY created_at").fetchall()
         return [self._variant(r) for r in rows]
 
-    def evaluated(self) -> list[Variant]:
-        return [v for v in self.all() if v.status == "evaluated" and v.dev is not None]
+    def evaluated(self, model: str | None = None) -> list[Variant]:
+        return [v for v in self.all() if v.status == "evaluated" and v.dev is not None
+                and (model is None or v.model is None or v.model == model)]
 
     def children(self, vid: str) -> list[Variant]:
         with self._lock:
@@ -222,9 +261,65 @@ class Archive:
             cur = v.parent_id
         return chain[::-1]
 
+    # ----------------------------------------------------------------- models
+    @staticmethod
+    def _model(row: sqlite3.Row) -> ModelRecord:
+        d = dict(row)
+        d["recipe"] = json.loads(d["recipe"] or "{}")
+        d["stats"] = json.loads(d["stats"] or "{}")
+        d["is_current"] = bool(d["is_current"])
+        return ModelRecord(**d)
+
+    def add_model(self, tag: str, parent_tag: str | None, round_no: int, status: str,
+                  recipe: dict | None = None) -> None:
+        with self._lock:
+            self.db.execute(
+                "INSERT OR REPLACE INTO models (tag, parent_tag, round, created_at, status, recipe) VALUES (?,?,?,?,?,?)",
+                (tag, parent_tag, round_no, time.time(), status, json.dumps(recipe or {})))
+            self.db.commit()
+
+    def update_model(self, tag: str, **fields) -> None:
+        if not fields:
+            return
+        for k in ("recipe", "stats"):
+            if k in fields and not isinstance(fields[k], str):
+                fields[k] = json.dumps(fields[k])
+        cols = ", ".join(f"{k} = ?" for k in fields)
+        with self._lock:
+            self.db.execute(f"UPDATE models SET {cols} WHERE tag = ?", (*fields.values(), tag))
+            self.db.commit()
+
+    def get_model(self, tag: str) -> ModelRecord | None:
+        with self._lock:
+            row = self.db.execute("SELECT * FROM models WHERE tag = ?", (tag,)).fetchone()
+        return self._model(row) if row else None
+
+    def models(self) -> list[ModelRecord]:
+        with self._lock:
+            rows = self.db.execute("SELECT * FROM models ORDER BY created_at").fetchall()
+        return [self._model(r) for r in rows]
+
+    def set_current_model(self, tag: str) -> None:
+        with self._lock:
+            self.db.execute("UPDATE models SET is_current = 0")
+            self.db.execute("UPDATE models SET is_current = 1 WHERE tag = ?", (tag,))
+            self.db.commit()
+
+    def model_score(self, model: str, genome_id: str, split: str) -> float | None:
+        with self._lock:
+            row = self.db.execute("SELECT score FROM model_scores WHERE model=? AND genome_id=? AND split=?",
+                                  (model, genome_id, split)).fetchone()
+        return None if row is None else float(row[0])
+
+    def set_model_score(self, model: str, genome_id: str, split: str, score: float) -> None:
+        with self._lock:
+            self.db.execute("INSERT OR REPLACE INTO model_scores VALUES (?,?,?,?)", (model, genome_id, split, score))
+            self.db.commit()
+
     def reset(self) -> None:
         with self._lock:
-            self.db.executescript("DELETE FROM variants; DELETE FROM evals; DELETE FROM events;")
+            self.db.executescript("DELETE FROM variants; DELETE FROM evals; DELETE FROM events; "
+                                  "DELETE FROM models; DELETE FROM model_scores;")
             self.db.commit()
             shutil.rmtree(self.genomes, ignore_errors=True)
             self.genomes.mkdir(parents=True, exist_ok=True)

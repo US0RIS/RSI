@@ -16,6 +16,10 @@ GROUPS = {
     "Ollama": ["ollama_url", "model", "num_ctx", "keep_alive", "request_timeout_s", "chat_think"],
     "Evolution": ["smoke_tasks", "smoke_min_frac", "holdout_margin", "require_approval", "selection_lambda",
                   "selection_midpoint"],
+    "Self-training (RSI button)": [
+        "base_model", "hf_base_model", "trainer_python", "ollama_exe", "rsi_scaffold_generations",
+        "rsi_auto_promote", "rsi_model_margin", "rsi_dev_tolerance", "rsi_min_examples", "rsi_train_timeout_h",
+        "rsi_keep_failed_models"],
     "Budgets and sandbox (enforced by the supervisor)": [
         "llm_calls_per_task", "llm_calls_per_improve", "exec_calls_per_task", "task_timeout_s",
         "improve_timeout_s", "exec_timeout_s", "sandbox_memory_mb"],
@@ -30,6 +34,12 @@ LABELS = {
     "exec_calls_per_task": "Code runs per task", "task_timeout_s": "Task timeout (s)",
     "improve_timeout_s": "improve() timeout (s)", "exec_timeout_s": "Code run timeout (s)",
     "sandbox_memory_mb": "Sandbox memory (MB)",
+    "base_model": "Ollama base model", "hf_base_model": "Training weights (Hugging Face id)",
+    "trainer_python": "Trainer Python (blank = default venv)", "ollama_exe": "ollama executable",
+    "rsi_scaffold_generations": "Agent generations per round", "rsi_auto_promote": "Promote automatically when gates pass",
+    "rsi_model_margin": "New weights: hold-out margin", "rsi_dev_tolerance": "New weights: max dev drop",
+    "rsi_min_examples": "Min. verified examples to train", "rsi_train_timeout_h": "Training timeout (h)",
+    "rsi_keep_failed_models": "Keep rejected models in Ollama",
 }
 
 

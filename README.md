@@ -35,10 +35,44 @@ py -3.12 -m pip install .
 qwen-rsi
 ```
 
+## The RSI button
+
+The **RSI** tab has one button. Each round it:
+
+1. lets the agent rewrite its own code and prompts for a few generations (as in the *Agent evolution* tab),
+2. asks the **current model** to design its own next training recipe from the results of past rounds,
+3. has the model write new coding problems; a problem is kept only if its reference solution passes its own
+   checks in the sandbox, a do-nothing stub fails them, and it doesn't resemble any benchmark task,
+4. has the model attempt each problem several times and keeps only answers that pass every check
+   (plus replay of earlier rounds' data to limit forgetting),
+5. fine-tunes the model on those answers with QLoRA (Unsloth) in a separate training environment,
+6. imports the result into Ollama as `qwen3.8-rsi:rN` and probes it for sanity,
+7. promotes the new weights only if the current champion agent scores higher with them on the hold-out tasks
+   (and doesn't drop on dev). Audit-task scores are recorded but never used to decide.
+
+Once promoted, the new weights do everything that follows: agent evolution, problem writing, recipe design and
+data collection. That feedback loop is the recursive part. Rejected models are deleted from Ollama, and any
+model can be reverted by setting it as the model in Settings.
+
+**What to expect.** Each round is slow: at roughly 30–40 tokens/s, sampling hundreds of attempts with thinking
+takes hours, and the fine-tune adds more. Plan on about one round per day on a single 24 GB GPU. Gains, if
+any, will come in steps and shrink over rounds; there is no guarantee any round is promoted. If the agent
+reaches 100% on the 12 hold-out tasks, new weights can no longer win, so add harder hold-out tasks in
+`%LOCALAPPDATA%\QwenRSI\tasks\`.
+
+**Training setup (once).** Training needs an NVIDIA GPU with about 24 GB of VRAM and about 40 GB of free disk:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\setup_trainer.ps1
+```
+
+Then press **Check trainer** on the RSI tab. Without a working trainer, the button still evolves the agent and
+saves verified training data (`%LOCALAPPDATA%\QwenRSI\selftrain\`) for later rounds.
+
 ## Use
 
 - **Chat.** Talk to the model with live thinking output, or switch the mode to *Champion agent* to send your message through the current best self-improved genome.
-- **Self-improvement.** Press **Start**. The app evaluates the seed genome, then loops: pick a parent, let it rewrite itself, then score the child (smoke stage → dev stage → hold-out stage).
+- **Agent evolution.** The agent-only loop (no weight training). Press **Start**. The app evaluates the seed genome, then loops: pick a parent, let it rewrite itself, then score the child (smoke stage → dev stage → hold-out stage).
   - The chart and archive table show every variant.
   - The diff tab shows exactly what changed.
   - When a child beats the champion on the hold-out set, you get a Windows notification. Review the diff, then click **Approve as champion**. The same button rolls back to any earlier variant.
@@ -70,7 +104,7 @@ Put some tasks in `"split": "holdout"`. Only those decide promotions, so they ke
 
 ```powershell
 py -3.12 -m pip install -e .[dev]
-pytest                  # 22 tests, using a scripted fake Ollama server; no GPU needed
+pytest                  # 31 tests, using a scripted fake Ollama server and fake trainer; no GPU needed
 python -m qwen_rsi      # run from source
 ```
 

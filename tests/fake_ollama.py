@@ -24,6 +24,36 @@ class State:
     def __init__(self):
         self.requests = []
         self.improve_mode = "good"   # good | bad_search | guard_violation
+        self.models = {"qwen3.8:27b"}
+        self.gen_counter = 0
+        self.attempt_counter = 0
+
+
+def _gen_tasks(state, n):
+    """Mostly valid generated tasks, plus one contaminating and one weak task."""
+    out = []
+    for _ in range(n):
+        state.gen_counter += 1
+        k = state.gen_counter
+        ep = f"scale_sum_{k}"
+        out.append({
+            "entry_point": ep,
+            "prompt": f"Write `{ep}(xs: list[int]) -> int` returning the sum of xs multiplied by {k + 1}. "
+                      f"Return 0 for an empty list. Raise TypeError if xs is not a list.",
+            "reference_solution": f"def {ep}(xs):\n    if not isinstance(xs, list):\n        raise TypeError\n"
+                                  f"    return sum(xs) * {k + 1}\n",
+            "checks": [f"{ep}([1, 2]) == {3 * (k + 1)}", f"{ep}([]) == 0", f"{ep}([5]) == {5 * (k + 1)}",
+                       f"{ep}([-1, 1]) == 0", f"_raises(TypeError, {ep}, 'x')"],
+        })
+    out.append({"entry_point": "knapsack", "prompt": "Write `knapsack(weights, values, capacity) -> int` returning "
+                "the best value of a 0/1 knapsack selection within capacity.",
+                "reference_solution": "def knapsack(w, v, c):\n    return 0\n",
+                "checks": ["knapsack([], [], 1) == 0"] * 5})
+    out.append({"entry_point": "weak_thing", "prompt": "Write `weak_thing(x) -> None` that does nothing at all "
+                "and returns None for every input value given.",
+                "reference_solution": "def weak_thing(x):\n    return None\n",
+                "checks": ["weak_thing(1) is None"] * 5})
+    return out
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -44,7 +74,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/api/version":
             return self._send_json({"version": "0.99.0-fake"})
         if self.path == "/api/tags":
-            return self._send_json({"models": [{"name": "qwen3.8:27b"}]})
+            return self._send_json({"models": [{"name": m} for m in sorted(self.state.models)]})
         if self.path == "/api/ps":
             return self._send_json({"models": [{"name": "qwen3.8:27b", "size_vram": 19000000000}]})
         self._send_json({"error": "not found"}, 404)
@@ -55,10 +85,11 @@ class Handler(BaseHTTPRequestHandler):
         self.state.requests.append(req)
         if self.path == "/api/show":
             return self._send_json({"capabilities": ["completion", "tools", "thinking", "vision"],
-                                    "model_info": {"qwen38.context_length": 262144}})
+                                    "model_info": {"qwen38.context_length": 262144},
+                                    "renderer": "qwen3.8", "parser": "qwen3.8", "parameters": "temperature 0.6"})
         if self.path != "/api/chat":
             return self._send_json({"error": "unsupported"}, 404)
-        if req.get("model") != "qwen3.8:27b":
+        if req.get("model") not in self.state.models:
             return self._send_json({"error": f"model '{req.get('model')}' not found"}, 404)
         content = self._answer(req)
         chunks = [{"message": {"role": "assistant", "content": "", "thinking": "Let me think."}, "done": False}]
@@ -78,6 +109,15 @@ class Handler(BaseHTTPRequestHandler):
     def _answer(self, req):
         msgs = req.get("messages", [])
         text = "\n".join(m.get("content", "") for m in msgs)
+        trained = req.get("model", "").startswith("qwen3.8-rsi:")
+        if "What is 17 * 23" in text:
+            return "391"
+        if "new, original Python programming problems" in text:
+            n = int(re.search(r"Create (\d+) new", text).group(1))
+            return json.dumps({"tasks": _gen_tasks(self.state, n)})
+        if "designing the next round of your OWN post-training" in text:
+            return json.dumps({"analysis": "loss was fine; more data", "recipe": {"train": {"learning_rate": 0.0002},
+                               "task_gen": {"tasks_per_round": 12}}})
         if "You are improving the source code" in text:
             mode = self.state.improve_mode
             if mode == "guard_violation":
@@ -92,7 +132,13 @@ class Handler(BaseHTTPRequestHandler):
         if m:
             entry = m.group(1)
             system = msgs[0]["content"] if msgs and msgs[0]["role"] == "system" else ""
-            if entry in BROKEN and MAGIC not in system:
+            if entry.startswith("scale_sum_"):
+                k = int(entry.rsplit("_", 1)[1])
+                self.state.attempt_counter += 1
+                ok = trained or self.state.attempt_counter % 2 == 0
+                code = (f"def {entry}(xs):\n    if not isinstance(xs, list):\n        raise TypeError\n"
+                        f"    return sum(xs) * {k + 1}\n") if ok else f"def {entry}(xs):\n    return sum(xs)\n"
+            elif entry in BROKEN and MAGIC not in system and not trained:
                 code = f"def {entry}(*a, **k):\n    return None\n"
             else:
                 code = REFERENCE.get(entry, f"def {entry}(*a):\n    return None\n")

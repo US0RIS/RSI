@@ -186,14 +186,50 @@ figure is an estimate.
 - **No weight updates.** A natural extension is to collect the traces of successful runs and
   LoRA-fine-tune the model offline. That is out of scope for an Ollama-only app.
 
-## 9. Verification
+## 9. Weight-level loop (the RSI button)
 
-`pytest` runs 22 tests against a scripted fake Ollama server (`tests/fake_ollama.py`). They cover:
+The agent-only loop has a ceiling: the weights it runs on. The RSI button adds a second loop that changes the
+weights, and makes the model design that loop's training itself (`qwen_rsi/selftrain/`).
+
+| Step | Module | Who acts | Safeguard |
+|---|---|---|---|
+| 1. Agent generations | `evolve.py` | current weights | same staged gates as §5 |
+| 2. Recipe proposal | `engine.propose_recipe` | current weights | every field clamped to bounds (`recipe.py`); a recipe that repeats a failed one is mutated randomly instead |
+| 3. Task generation | `taskgen.py` | current weights | reference must pass all its checks in the sandbox; a stub must fail ≥60% of them; rejected if its name or prompt resembles any dev, hold-out, audit or user task, or duplicates the pool |
+| 4. Data collection | `collect.py` | current weights (or the full champion agent, `sampling.mode = "champion"`) | only attempts that pass every check; tasks above `max_pass_rate` dropped as too easy; verified reference used for unsolved tasks; replay of earlier rounds |
+| 5. Training | `train_lora.py` (separate venv) | Unsloth QLoRA | language layers only, loss on the answer only, supervisor-side timeout |
+| 6. Import | `ollama_import.py` | `ollama create` | `FROM base` + `ADAPTER`; if Ollama can't apply the adapter, merged 16-bit weights + `--quantize q4_K_M` with the base renderer/parser/template copied; then a probe (correct answer, no leaked `<think>` tags) |
+| 7. Gate | `engine.gate` | supervisor | champion genome re-run under the new weights: hold-out must rise by `rsi_model_margin`, dev may fall by at most `rsi_dev_tolerance`. Audit is measured and shown, never used to decide. |
+
+**Why this is the closest available thing to RSI.** After a promotion every actor in the table above runs on
+the new weights: they write the next problems, judge which recipe to try, and produce the next training data.
+Better weights should produce better recipes and data. Scores measured with different weights are never compared:
+each promotion re-bases the champion genome under the new model (`Evolver.rebase_champion`, variants carry a
+`model` column, parent selection only considers the current model's variants).
+
+**Why it still won't be exponential.**
+- Each round costs hours of sampling plus a fine-tune, roughly a day per round on one 24 GB GPU.
+- Self-training mostly makes reliable what the model can already do sometimes; tasks it never solves only
+  contribute the model's own reference solutions.
+- 12 hold-out tasks give a coarse, noisy gate, and repeated gating slowly overfits them. Rotate in new hold-out
+  tasks; the audit split is the independent check.
+- Once the agent reaches 100% on hold-out, new weights cannot win. Add harder hold-out tasks.
+
+**What was not tested.** The trainer (`train_lora.py` under Unsloth on a real GPU), `ollama create` with a
+Qwen3.8 adapter, and the merged fallback were written against the Unsloth package source (2026.11.4) and
+Ollama's Modelfile parser, but only exercised here through a fake trainer and a fake `ollama` CLI. Unsloth
+lists `unsloth/Qwen3.8-27B-unsloth-bnb-4bit`; whether Ollama accepts an adapter for this architecture is decided
+at runtime, with the merged path as the fallback.
+
+## 10. Verification
+
+`pytest` runs 31 tests against a scripted fake Ollama server (`tests/fake_ollama.py`) and a fake trainer (`tests/fake_trainer.py`). They cover:
 - **Benchmark:** every hidden check passes against the reference solutions (`tests/reference_solutions.py`) and fails against stubs.
 - **Guard and sandbox:** escapes, timeouts, memory caps and environment scrubbing.
 - **Grader:** tamper resistance.
 - **Full loop:** seed → improve → staged eval → approval, plus auto-promotion, invalid proposals, guard violations, Ollama outages, and a check that hold-out tasks never leak into reports.
-- **GUI:** the window drives a generation and both chat modes, offscreen.
+- **Weight loop:** a full round that trains, imports and promotes new weights, after which the promoted model designs round 2; rejection when the new weights are not better; training failure; missing trainer (data still saved); adapter-import fallback to merged weights; task verification (weak checks, benchmark leakage, duplicates); recipe bounds; prompt masking in training examples.
+- **GUI:** the window drives a generation, both chat modes and a full RSI round, offscreen.
 
 The Windows-only code paths (Job Object, AppUserModelID, the PowerShell installer) were written
 against the documented Win32 and PowerShell APIs, but this repository's tests run on Linux. Run
