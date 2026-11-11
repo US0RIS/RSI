@@ -1,0 +1,10 @@
+{
+  "think_solve": "medium",
+  "think_chat": "medium",
+  "think_improve": "high",
+  "options_solve": {"temperature": 0.6, "top_p": 0.95, "top_k": 20},
+  "options_improve": {"temperature": 0.7, "top_p": 0.95, "top_k": 20},
+  "max_fix_rounds": 1,
+  "improve_use_format": true,
+  "improve_attempts": 3
+}
