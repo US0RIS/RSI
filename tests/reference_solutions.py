@@ -503,3 +503,201 @@ def sum_fractions(fracs):
         t += Fraction(int(a), int(b))
     return f"{t.numerator}/{t.denominator}"
 '''
+
+# ------------------------------------------------------------------ audit split
+REFERENCE["roman_to_int"] = '''
+def roman_to_int(s):
+    vals = [(1000,"M"),(900,"CM"),(500,"D"),(400,"CD"),(100,"C"),(90,"XC"),(50,"L"),(40,"XL"),(10,"X"),(9,"IX"),(5,"V"),(4,"IV"),(1,"I")]
+    def to_r(n):
+        out = ""
+        for v, r in vals:
+            while n >= v:
+                out += r; n -= v
+        return out
+    if not isinstance(s, str) or not s:
+        raise ValueError(s)
+    single = {"I":1,"V":5,"X":10,"L":50,"C":100,"D":500,"M":1000}
+    total = 0
+    for i, ch in enumerate(s):
+        if ch not in single:
+            raise ValueError(s)
+        v = single[ch]
+        total += -v if i + 1 < len(s) and single.get(s[i + 1], 0) > v else v
+    if not 1 <= total <= 3999 or to_r(total) != s:
+        raise ValueError(s)
+    return total
+'''
+
+REFERENCE["group_anagrams"] = '''
+def group_anagrams(words):
+    g = {}
+    for w in words:
+        g.setdefault("".join(sorted(w)), []).append(w)
+    return sorted((sorted(v) for v in g.values()), key=lambda grp: grp[0])
+'''
+
+REFERENCE["max_subarray"] = '''
+def max_subarray(nums):
+    best = None
+    for i in range(len(nums)):
+        t = 0
+        for j in range(i, len(nums)):
+            t += nums[j]
+            if best is None or t > best[0]:
+                best = (t, i, j)
+    return best
+'''
+
+REFERENCE["flatten_json"] = '''
+def flatten_json(obj):
+    out = {}
+    def go(x, path):
+        if isinstance(x, dict) and x:
+            for k, v in x.items():
+                go(v, path + [str(k)])
+        elif isinstance(x, list) and x:
+            for i, v in enumerate(x):
+                go(v, path + [str(i)])
+        else:
+            out[".".join(path)] = x
+    for k, v in obj.items():
+        go(v, [str(k)])
+    return out
+'''
+
+REFERENCE["compress_ranges"] = '''
+def compress_ranges(nums):
+    a = sorted(set(nums)); out = []; i = 0
+    while i < len(a):
+        j = i
+        while j + 1 < len(a) and a[j + 1] == a[j] + 1:
+            j += 1
+        if j - i >= 2:
+            out.append(f"{a[i]}-{a[j]}")
+        else:
+            out += [str(x) for x in a[i:j + 1]]
+        i = j + 1
+    return ",".join(out)
+'''
+
+REFERENCE["word_ladder"] = '''
+from collections import deque
+def word_ladder(begin, end, words):
+    if begin == end:
+        return 1
+    ws = set(words); q = deque([(begin, 1)]); seen = {begin}
+    while q:
+        w, d = q.popleft()
+        for i in range(len(w)):
+            for c in "abcdefghijklmnopqrstuvwxyz":
+                n = w[:i] + c + w[i + 1:]
+                if n in ws and n not in seen:
+                    if n == end:
+                        return d + 1
+                    seen.add(n); q.append((n, d + 1))
+    return 0
+'''
+
+REFERENCE["grid_paths"] = '''
+def grid_paths(grid):
+    if not grid or not grid[0] or grid[0][0] == "#" or grid[-1][-1] == "#":
+        return 0
+    w = len(grid[0]); row = [0] * w
+    for r, line in enumerate(grid):
+        for c in range(w):
+            if line[c] == "#":
+                row[c] = 0
+            elif r == 0 and c == 0:
+                row[c] = 1
+            else:
+                row[c] = row[c] + (row[c - 1] if c else 0)
+    return row[-1]
+'''
+
+REFERENCE["eval_rpn"] = '''
+def eval_rpn(tokens):
+    st = []
+    for t in tokens:
+        if t in ("+", "-", "*", "/"):
+            if len(st) < 2:
+                raise ValueError(t)
+            b = st.pop(); a = st.pop()
+            if t == "+": st.append(a + b)
+            elif t == "-": st.append(a - b)
+            elif t == "*": st.append(a * b)
+            else:
+                q = abs(a) // abs(b)
+                st.append(q if (a >= 0) == (b >= 0) else -q)
+        else:
+            try:
+                st.append(int(t))
+            except ValueError:
+                raise ValueError(t) from None
+    if len(st) != 1:
+        raise ValueError(tokens)
+    return st[0]
+'''
+
+REFERENCE["min_rooms"] = '''
+def min_rooms(meetings):
+    ev = []
+    for s, e in meetings:
+        if e > s:
+            ev += [(s, 1), (e, -1)]
+    best = cur = 0
+    for _, d in sorted(ev, key=lambda x: (x[0], x[1])):
+        cur += d; best = max(best, cur)
+    return best
+'''
+
+REFERENCE["base_convert"] = '''
+def base_convert(s, from_base, to_base):
+    if not (2 <= from_base <= 36 and 2 <= to_base <= 36):
+        raise ValueError("base")
+    digits = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    neg = s.startswith("-"); body = s[1:] if neg else s
+    if not body:
+        raise ValueError(s)
+    n = 0
+    for ch in body.upper():
+        d = digits.find(ch)
+        if d < 0 or d >= from_base:
+            raise ValueError(s)
+        n = n * from_base + d
+    if n == 0:
+        return "0"
+    out = ""
+    while n:
+        n, r = divmod(n, to_base); out = digits[r] + out
+    return "-" + out if neg else out
+'''
+
+REFERENCE["scs_length"] = '''
+def scs_length(a, b):
+    prev = [0] * (len(b) + 1)
+    for x in a:
+        cur = [0]
+        for j, y in enumerate(b):
+            cur.append(prev[j] + 1 if x == y else max(prev[j + 1], cur[j]))
+        prev = cur
+    return len(a) + len(b) - prev[-1]
+'''
+
+REFERENCE["cron_match"] = '''
+def cron_match(expr, minute, hour):
+    def field(spec, value, lo, hi):
+        for item in spec.split(","):
+            rng, _, step = item.partition("/")
+            step = int(step) if step else 1
+            if rng == "*":
+                a, b = lo, hi
+            elif "-" in rng:
+                a, b = map(int, rng.split("-"))
+            else:
+                a = b = int(rng)
+            if a <= value <= b and (value - a) % step == 0:
+                return True
+        return False
+    m, h = expr.split()
+    return field(m, minute, 0, 59) and field(h, hour, 0, 23)
+'''

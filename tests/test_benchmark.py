@@ -4,8 +4,10 @@ from reference_solutions import REFERENCE
 
 def test_split_and_ids():
     tasks = load_tasks()
-    assert len({t.id for t in tasks}) == len(tasks) == 30
+    assert len({t.id for t in tasks}) == len(tasks) == 42
+    assert sum(t.split == "dev" for t in tasks) == 18
     assert sum(t.split == "holdout" for t in tasks) == 12
+    assert sum(t.split == "audit" for t in tasks) == 12
 
 
 def test_reference_solutions_pass_all_checks():
